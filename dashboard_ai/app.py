@@ -74,6 +74,14 @@ def display(value):
     if isinstance(value, (dict, list)): return json.dumps(value, ensure_ascii=False, default=str)
     return str(value)
 
+def format_timestamp_ms(value):
+    """Format a Unix timestamp in milliseconds in the machine's local timezone."""
+    if value is None or value == "": return "Unavailable"
+    try:
+        return datetime.fromtimestamp(float(value) / 1000).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    except (TypeError, ValueError, OverflowError, OSError):
+        return display(value)
+
 def severity_label(value):
     return str(value).replace("_", " ").title() if value is not None else "Unknown"
 
@@ -92,6 +100,37 @@ def category_group(value):
     if any(part in text for part in ("behavior", "rate", "volume", "anomal", "traffic")): return "Behavioral alert"
     return "Other / backend category"
 
+def device_table_row(device):
+    auth = is_authorized(device)
+    return {
+        "Device ID": display(first(device, "device_id", "id")),
+        "Type": display(first(device, "device_type", "type")),
+        "Authorization": display(auth),
+        "Last seen": format_timestamp_ms(first(device, "last_seen_ms")),
+        "Messages in observation window": display(first(device, "messages_in_window")),
+        "Received bytes in window": display(first(device, "bytes_in_window")),
+        "Record": device,
+    }
+
+def alert_table_row(alert, index):
+    evidence = first(alert, "evidence")
+    threshold = first(alert, "threshold")
+    if threshold is None and isinstance(evidence, dict):
+        threshold = first(evidence, "threshold")
+    return {
+        "_index": index,
+        "Alert ID": display(first(alert, "alert_id", "id")),
+        "Device ID": display(first(alert, "device_id")),
+        "Category group": category_group(category_of(alert)),
+        "Category": display(category_of(alert)),
+        "Severity": severity_label(first(alert, "severity")),
+        "Timestamp": format_timestamp_ms(first(alert, "timestamp_ms")),
+        "Rule": display(first(alert, "rule_name", "rule", "summary")),
+        "Threshold": display(threshold),
+        "Evidence": display(evidence),
+        "Record": alert,
+    }
+
 # Summary counts use only records from the selected source.
 authorized_count = sum(1 for d in devices if is_authorized(d) is True or str(is_authorized(d)).lower() in ("authorized", "registered"))
 reg_available = any(is_authorized(d) is not None for d in devices)
@@ -104,10 +143,10 @@ metrics = st.columns(6)
 registered_values = [first(d, "registered", "is_registered") for d in devices if first(d, "registered", "is_registered") is not None]
 registered_count = sum(1 for value in registered_values if value is True or str(value).lower() in ("registered", "authorized"))
 metrics[0].metric("Registered devices", registered_count if registered_values else "Unavailable", help="Counts only explicit registered/is_registered fields; authorization is shown separately.")
-metrics[1].metric("Currently observed", "Unavailable", help="No confirmed backend definition of currently observed/online was available.")
+metrics[1].metric("Currently observed", "Unavailable", help="The device response has last_seen_ms but no observation cutoff or online status, so current presence cannot be derived.")
 metrics[2].metric("Unauthorized-device alerts", unauth_alerts if alerts else 0)
 metrics[3].metric("Behavioral alerts", behavior_alerts if alerts else 0)
-metrics[4].metric("Recent incidents", len(incident_ids) if incident_ids else "Unavailable", help="Counts distinct incident_id values supplied by the backend; alerts are not assumed to be unique incidents.")
+metrics[4].metric("Recent incidents", len(incident_ids) if incident_ids else "Unavailable", help="The confirmed alert response has no incident identifier. Alerts are not assumed to be unique incidents.")
 metrics[5].metric("Authorized devices", authorized_count if reg_available else "Unavailable", help="Count uses explicit authorization fields only.")
 
 with st.expander("Severity distribution · alert counts", expanded=True):
@@ -131,8 +170,7 @@ auth_choice = auth_filter.selectbox("Authorization", auth_options, key="device_a
 device_rows = []
 for d in devices:
     auth = is_authorized(d)
-    auth_text = display(auth)
-    row = {"Device ID": display(first(d, "device_id", "id")), "Type": display(first(d, "device_type", "type")), "Authorization": auth_text, "Last seen": display(first(d, "last_seen", "last_seen_at", "lastSeen")), "Message frequency": display(first(d, "message_frequency", "message_rate", "messages_per_minute")), "Received data volume": display(first(d, "received_data_volume", "data_volume", "bytes_received")), "Record": d}
+    row = device_table_row(d)
     haystack = json.dumps(d, ensure_ascii=False, default=str).lower()
     if query.lower() in haystack and (auth_choice == "All" or (auth_choice == "Unclassified" and auth is None) or (auth_choice == "Authorized" and (auth is True or str(auth).lower() in ("authorized", "registered"))) or (auth_choice == "Unauthorized" and (auth is False or str(auth).lower() in ("unauthorized", "unregistered")))):
         device_rows.append(row)
@@ -155,7 +193,7 @@ chosen_severity = severity_filter.selectbox("Severity", ["All"] + severity_value
 alert_rows = []
 for index, a in enumerate(alerts):
     cat = category_of(a)
-    row = {"_index": index, "Alert ID": display(first(a, "alert_id", "id")), "Device ID": display(first(a, "device_id")), "Category group": category_group(cat), "Category": display(cat), "Severity": severity_label(first(a, "severity")), "Timestamp": display(first(a, "timestamp", "created_at", "time")), "Rule": display(first(a, "rule_name", "rule")), "Threshold": display(first(a, "threshold")), "Evidence": display(first(a, "evidence")), "Record": a}
+    row = alert_table_row(a, index)
     if alert_query.lower() in json.dumps(a, ensure_ascii=False, default=str).lower() and (chosen_category == "All" or str(cat) == chosen_category) and (chosen_severity == "All" or row["Severity"] == chosen_severity):
         alert_rows.append(row)
 if alert_rows:

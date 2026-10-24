@@ -94,7 +94,7 @@ def test_dashboard_has_data_mode_guardrails_and_filters():
     source = (ROOT / "app.py").read_text()
     assert "DEMO MODE: Synthetic data. These records are not live network observations." in source
     assert 'category_filter.selectbox("Category"' in source and 'severity_filter.selectbox("Severity"' in source
-    assert "currently observed/online was available" in source
+    assert "current presence cannot be derived" in source
     assert "generate_incident_report(chosen[\"Record\"]" in source
     assert "get_demo_data()" in source
 
