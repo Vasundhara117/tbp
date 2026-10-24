@@ -41,8 +41,9 @@ col_refresh, col_state = st.columns([1, 4])
 with col_refresh:
     refresh = st.button("Refresh backend", type="primary")
 if st.session_state.snapshot is None or refresh:
-    st.session_state.snapshot = load_snapshot()
-    st.session_state.load_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    with st.spinner("Fetching backend data…"):
+        st.session_state.snapshot = load_snapshot()
+        st.session_state.load_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 snapshot = st.session_state.snapshot
 
 health_ok = snapshot["health"].ok
@@ -53,6 +54,7 @@ if live_data_ok:
     mode = "LIVE BACKEND DATA"
     with col_state:
         st.success(f"{mode} · last fetched {st.session_state.load_time}")
+    st.caption("The confirmed API fields do not report independent network-observer availability; records below are backend API responses.")
     if not health_ok:
         st.warning("Health check unavailable; device and alert endpoints responded successfully.")
 else:
@@ -86,7 +88,7 @@ def severity_label(value):
     return str(value).replace("_", " ").title() if value is not None else "Unknown"
 
 def is_authorized(device):
-    for key in ("authorized", "is_authorized", "authorization_status", "registered"):
+    for key in ("authorized", "is_authorized", "authorization_status"):
         if key in device and device[key] is not None:
             return device[key]
     return None
@@ -97,7 +99,8 @@ def category_of(alert):
 def category_group(value):
     text = str(value or "").lower()
     if "unauthor" in text or "unregistered" in text: return "Unauthorized/unregistered device"
-    if any(part in text for part in ("behavior", "rate", "volume", "anomal", "traffic")): return "Behavioral alert"
+    if "unknown" in text: return "Unknown-device alert"
+    if any(part in text for part in ("behavior", "rate", "volume", "anomal", "abnormal", "traffic")): return "Behavioral alert"
     return "Other / backend category"
 
 def device_table_row(device):
@@ -105,10 +108,16 @@ def device_table_row(device):
     return {
         "Device ID": display(first(device, "device_id", "id")),
         "Type": display(first(device, "device_type", "type")),
+        "MAC address": display(first(device, "mac_address", "mac")),
+        "IP address": display(first(device, "ip_address", "ip")),
+        "Registered": display(first(device, "registered", "is_registered")),
         "Authorization": display(auth),
+        "First seen": format_timestamp_ms(first(device, "first_seen_ms", "first_seen_at", "first_seen")),
         "Last seen": format_timestamp_ms(first(device, "last_seen_ms")),
         "Messages in observation window": display(first(device, "messages_in_window")),
         "Received bytes in window": display(first(device, "bytes_in_window")),
+        "Observation source": display(first(device, "observation_source", "observer_source", "discovery_source", "source")),
+        "Record origin": "Synthetic demo" if device.get("_provenance") == "synthetic" else "Backend API record",
         "Record": device,
     }
 
@@ -131,23 +140,26 @@ def alert_table_row(alert, index):
         "Record": alert,
     }
 
-# Summary counts use only records from the selected source.
-authorized_count = sum(1 for d in devices if is_authorized(d) is True or str(is_authorized(d)).lower() in ("authorized", "registered"))
-reg_available = any(is_authorized(d) is not None for d in devices)
+# Summary counts use only records from the selected source and explicit fields.
+authorization_values = [is_authorized(d) for d in devices if is_authorized(d) is not None]
+authorized_count = sum(1 for value in authorization_values if value is True or str(value).lower() == "authorized")
+unauthorized_device_count = sum(1 for value in authorization_values if value is False or str(value).lower() == "unauthorized")
+authorization_available = bool(authorization_values)
 incident_ids = {str(first(a, "incident_id")) for a in alerts if first(a, "incident_id") is not None}
 unauth_alerts = sum(category_group(category_of(a)) == "Unauthorized/unregistered device" for a in alerts)
 behavior_alerts = sum(category_group(category_of(a)) == "Behavioral alert" for a in alerts)
 
 st.subheader("Overview")
-metrics = st.columns(6)
-registered_values = [first(d, "registered", "is_registered") for d in devices if first(d, "registered", "is_registered") is not None]
-registered_count = sum(1 for value in registered_values if value is True or str(value).lower() in ("registered", "authorized"))
-metrics[0].metric("Registered devices", registered_count if registered_values else "Unavailable", help="Counts only explicit registered/is_registered fields; authorization is shown separately.")
-metrics[1].metric("Currently observed", "Unavailable", help="The device response has last_seen_ms but no observation cutoff or online status, so current presence cannot be derived.")
-metrics[2].metric("Unauthorized-device alerts", unauth_alerts if alerts else 0)
-metrics[3].metric("Behavioral alerts", behavior_alerts if alerts else 0)
-metrics[4].metric("Recent incidents", len(incident_ids) if incident_ids else "Unavailable", help="The confirmed alert response has no incident identifier. Alerts are not assumed to be unique incidents.")
-metrics[5].metric("Authorized devices", authorized_count if reg_available else "Unavailable", help="Count uses explicit authorization fields only.")
+metrics_top = st.columns(4)
+metrics_bottom = st.columns(4)
+metrics_top[0].metric("Device records", len(devices), help="Number of records returned by /api/v1/devices; this is not a count of independently observed network devices.")
+metrics_top[1].metric("Currently observed", "Unavailable", help="The confirmed response has last_seen_ms but no online status or observation cutoff, so current presence cannot be derived.")
+metrics_top[2].metric("Authorized devices", authorized_count if authorization_available else "Unavailable", help="Counts explicit authorized/is_authorized/authorization_status classifications only.")
+metrics_top[3].metric("Unauthorized devices", unauthorized_device_count if authorization_available else "Unavailable", help="Counts explicit unauthorized classifications only; registration status alone is not treated as authorization.")
+metrics_bottom[0].metric("Unauthorized-device alerts", unauth_alerts if alerts else 0)
+metrics_bottom[1].metric("Behavioral alerts", behavior_alerts if alerts else 0)
+metrics_bottom[2].metric("Alerts returned", len(alerts))
+metrics_bottom[3].metric("Recent incidents", len(incident_ids) if incident_ids else "Unavailable", help="The confirmed alert response has no incident identifier. Alerts are not assumed to be unique incidents.")
 
 with st.expander("Severity distribution · alert counts", expanded=True):
     severity_counts = {}
@@ -160,6 +172,7 @@ with st.expander("Severity distribution · alert counts", expanded=True):
         st.caption("Counts alerts by supplied severity; these are not unique incident counts.")
     else:
         st.write("No alerts are available to chart.")
+    st.caption("No confirmed activity time series is available from the current device and alert responses; this view counts supplied alerts only.")
 
 st.divider()
 st.subheader("Devices")
@@ -172,10 +185,11 @@ for d in devices:
     auth = is_authorized(d)
     row = device_table_row(d)
     haystack = json.dumps(d, ensure_ascii=False, default=str).lower()
-    if query.lower() in haystack and (auth_choice == "All" or (auth_choice == "Unclassified" and auth is None) or (auth_choice == "Authorized" and (auth is True or str(auth).lower() in ("authorized", "registered"))) or (auth_choice == "Unauthorized" and (auth is False or str(auth).lower() in ("unauthorized", "unregistered")))):
+    if query.lower() in haystack and (auth_choice == "All" or (auth_choice == "Unclassified" and auth is None) or (auth_choice == "Authorized" and (auth is True or str(auth).lower() == "authorized")) or (auth_choice == "Unauthorized" and (auth is False or str(auth).lower() == "unauthorized"))):
         device_rows.append(row)
 if device_rows:
     st.dataframe([{k: v for k, v in row.items() if k != "Record"} for row in device_rows], use_container_width=True, hide_index=True)
+    st.caption("Record origin identifies the API or synthetic source. Network observation source is shown only when provided by the backend; an API record alone does not establish independent network observation.")
     with st.expander("Inspect original device record"):
         selected_dev = st.selectbox("Device record", range(len(device_rows)), format_func=lambda i: device_rows[i]["Device ID"], key="device_detail")
         st.json(device_rows[selected_dev]["Record"])
