@@ -1,13 +1,19 @@
 """FastAPI application and versioned security-engine endpoints."""
 
+import ipaddress
 from typing import Any
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from .alert_store import AlertStore
 from .config import Settings
 from .detector import SecurityEngine
+from .observers import (
+    ObservationProviderError,
+    ScapyPassiveObservationProvider,
+    SyntheticObservationProvider,
+)
 from .registry import DeviceRegistry
 from .schemas import (
     AlertListResponse,
@@ -15,6 +21,9 @@ from .schemas import (
     HealthResponse,
     MessageRequest,
     MessageResponse,
+    MonitoringStatusResponse,
+    NetworkObservation,
+    ObservationIngestResponse,
 )
 
 
@@ -29,7 +38,10 @@ class RequestBodySizeLimitMiddleware:
         if (
             scope["type"] != "http"
             or scope["method"] != "POST"
-            or scope["path"] != "/api/v1/messages"
+            or scope["path"] not in {
+                "/api/v1/messages",
+                "/api/v1/observations",
+            }
         ):
             await self.app(scope, receive, send)
             return
@@ -75,15 +87,24 @@ class RequestBodySizeLimitMiddleware:
 def create_app(
     settings: Settings | None = None,
     registry: DeviceRegistry | None = None,
+    *,
+    passive_provider: ScapyPassiveObservationProvider | None = None,
 ) -> FastAPI:
     """Create an isolated app instance for tests or embedding."""
     selected_settings = settings if settings is not None else Settings.from_env()
     selected_registry = registry if registry is not None else DeviceRegistry()
     alert_store = AlertStore(selected_settings.alert_history_limit)
     engine = SecurityEngine(selected_settings, selected_registry, alert_store)
+    synthetic_provider = SyntheticObservationProvider()
+    selected_passive_provider = passive_provider or ScapyPassiveObservationProvider(
+        selected_settings.passive_capture_interface,
+        engine.process_observation,
+    )
 
     app = FastAPI(title="SecureIoT Sentinel Security Engine", version="1.0.0")
     app.state.engine = engine
+    app.state.synthetic_provider = synthetic_provider
+    app.state.passive_provider = selected_passive_provider
     app.add_middleware(
         RequestBodySizeLimitMiddleware,
         max_body_bytes=selected_settings.max_request_body_bytes,
@@ -107,7 +128,83 @@ def create_app(
         items = alert_store.recent(limit)
         return AlertListResponse(alerts=items, count=len(items))
 
+    @app.post(
+        "/api/v1/observations",
+        response_model=ObservationIngestResponse,
+    )
+    def receive_observation(
+        observation: NetworkObservation,
+    ) -> ObservationIngestResponse:
+        return engine.process_observation(observation)
+
+    @app.get(
+        "/api/v1/monitoring/status",
+        response_model=MonitoringStatusResponse,
+    )
+    def monitoring_status() -> MonitoringStatusResponse:
+        return MonitoringStatusResponse(
+            synthetic_available=True,
+            passive_capture_enabled=selected_settings.passive_capture_enabled,
+            passive_capture_running=selected_passive_provider.running,
+            passive_capture_interface=selected_settings.passive_capture_interface,
+            platform=selected_passive_provider.platform_name(),
+            scapy_available=selected_passive_provider.scapy_available(),
+            error=selected_passive_provider.error,
+        )
+
+    @app.post(
+        "/api/v1/monitoring/synthetic/next",
+        response_model=ObservationIngestResponse,
+    )
+    def synthetic_observation() -> ObservationIngestResponse:
+        observation = synthetic_provider.next_observation()
+        return engine.process_observation(observation)
+
+    @app.post("/api/v1/monitoring/passive/start")
+    def start_passive_monitoring(request: Request) -> dict[str, str | bool]:
+        if not _request_is_loopback(request):
+            raise HTTPException(
+                status_code=403,
+                detail="Passive monitoring controls are restricted to loopback clients.",
+            )
+        if not selected_settings.passive_capture_enabled:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Passive capture is disabled. Set "
+                    "SECURITY_ENGINE_PASSIVE_CAPTURE_ENABLED=true to enable it."
+                ),
+            )
+        try:
+            selected_passive_provider.start()
+        except ObservationProviderError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"running": selected_passive_provider.running}
+
+    @app.post("/api/v1/monitoring/passive/stop")
+    def stop_passive_monitoring(request: Request) -> dict[str, str | bool]:
+        if not _request_is_loopback(request):
+            raise HTTPException(
+                status_code=403,
+                detail="Passive monitoring controls are restricted to loopback clients.",
+            )
+        try:
+            selected_passive_provider.stop()
+        except ObservationProviderError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {"running": selected_passive_provider.running}
+
     return app
+
+
+def _request_is_loopback(request: Request) -> bool:
+    client = request.client
+    if client is None:
+        return False
+    try:
+        return ipaddress.ip_address(client.host).is_loopback
+    except ValueError:
+        return False
 
 
 app = create_app()

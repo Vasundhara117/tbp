@@ -8,8 +8,10 @@ does not require physical ESP32 hardware.
 
 - `app/registry.py` stores which device IDs are authorized. Registration is
   distinct from observed activity.
-- `app/detector.py` tracks server-side rolling observations and applies the
-  three independent detection rules.
+- `app/detector.py` tracks server-side rolling observations and applies
+  deterministic authorization, rate, volume, and configured destination rules.
+- `app/observers.py` provides repeatable simulated events and an optional,
+  explicitly controlled Scapy passive-capture provider.
 - `app/alert_store.py` assigns increasing alert IDs and keeps a bounded,
   in-memory history.
 - `app/main.py` exposes the API. Its ASGI middleware measures the raw message
@@ -91,7 +93,9 @@ Python code. The standalone server reads these optional environment variables:
 | `SECURITY_ENGINE_UNREGISTERED_COOLDOWN_SECONDS` | `60` | Repeat interval for unregistered-device alerts |
 | `SECURITY_ENGINE_BEHAVIORAL_COOLDOWN_SECONDS` | `60` | Repeat interval while a behavioral rule stays active |
 | `SECURITY_ENGINE_ALERT_HISTORY_LIMIT` | `1000` | Maximum alerts retained in memory |
-| `SECURITY_ENGINE_MAX_REQUEST_BODY_BYTES` | `65536` | Maximum raw body size accepted by the message endpoint |
+| `SECURITY_ENGINE_MAX_REQUEST_BODY_BYTES` | `65536` | Maximum raw body size accepted by message and observation endpoints |
+| `SECURITY_ENGINE_PASSIVE_CAPTURE_ENABLED` | `false` | Opt in to the loopback-only passive-capture controls |
+| `SECURITY_ENGINE_PASSIVE_CAPTURE_INTERFACE` | unset | Scapy interface name selected for explicit capture |
 
 The 10 KiB volume threshold and 10-second window are demonstration settings, not
 universal security limits. Request size means the HTTP request-body bytes
@@ -118,6 +122,135 @@ does not use SQLite or other persistent storage. Each `create_app()` call
 creates fresh isolated engine state. Every HTTP message request counts as a
 message, even if its `message_id` repeats; message IDs do not authenticate a
 device.
+
+## Independent network observations
+
+`POST /api/v1/observations` accepts metadata independently of
+`POST /api/v1/messages`. The validated observation can include an application
+device ID, MAC/IP addresses, a source and timestamp, device-type hint,
+message/packet and byte counts, destination IP, protocol, and a `simulated`
+flag. Payload contents are not part of the observation model. The endpoint
+updates the same in-memory inventory and alert pipeline used by messages.
+
+The matching order is explicit:
+
+1. A supplied `device_id` matches that registry ID. It is a caller-supplied
+   label, not proof of physical identity.
+2. Without a `device_id`, a MAC address matches a registered device only when
+   that address was explicitly mapped in the trusted registry.
+3. An unregistered MAC gets a MAC-keyed record. An observation with neither a
+   device ID nor MAC gets its own record; IP-only observations are never merged
+   based on the IP address.
+
+MACs may be spoofed or randomized, and an IP address may be reassigned. Even a
+trusted MAC mapping is an allowlist hint, not cryptographic authentication or
+conclusive spoofing detection. Registry ID authorization remains compatible
+with the original message API. The ingestion endpoint accepts caller-supplied
+`source` and `simulated` values, so these are provenance labels rather than
+cryptographic attestations. The synthetic demonstration route itself generates
+and marks its own records.
+
+Configure a MAC allowlist through the existing `DeviceRegistry`:
+
+```python
+from app.main import create_app
+from app.registry import DeviceRegistry
+
+registry = DeviceRegistry(
+    {"CCTV-ESP32-01": "cctv_simulator"},
+    mac_addresses={"02:00:00:00:00:01": "CCTV-ESP32-01"},
+    expected_destinations={
+        "CCTV-ESP32-01": {"192.0.2.5", "198.51.100.10"}
+    },
+)
+app = create_app(registry=registry)
+```
+
+An `UNEXPECTED_DESTINATION` alert is generated only for devices with a
+configured destination allowlist and observations that actually contain a
+destination IP. With no allowlist, destination metadata is recorded but is not
+classified as unexpected.
+
+For a safe, deterministic demonstration, start the backend and submit:
+
+```powershell
+Invoke-RestMethod -Method Post `
+    -Uri "http://127.0.0.1:8000/api/v1/monitoring/synthetic/next"
+```
+
+Repeated calls alternate between a trusted demonstration device and an
+untrusted one. Every such record has `simulated: true` and the source
+`synthetic_demo`; its observation `timestamp_ms` is generated from the current
+provider clock at event creation, not a fixed historical demo date. This is
+generated demonstration data, not network discovery.
+Check `/api/v1/monitoring/status` for provider capability and state, and inspect
+`/api/v1/devices` and `/api/v1/alerts` for the resulting inventory and alerts.
+An untrusted observed device is alerted even if it never submits an HTTP
+heartbeat.
+
+When supplied, an observation's `timestamp_ms` is its event time and is
+returned with the ingestion response. It is also retained as
+`observation_timestamp_ms` evidence. Alert `timestamp_ms` and inventory
+`first_seen_ms`/`last_seen_ms` represent backend receipt time; receipt time and
+the monotonic clock drive activity windows and cooldowns. Synthetic event time
+is set at creation, so it should be close to receipt time. This distinction
+also applies to delayed observations, for which event and alert times may
+differ. No router/AP client-list provider is included because no authorized
+router interface is configured for this project.
+
+Unauthorized-device alerts are deduplicated per device and alert category for
+`SECURITY_ENGINE_UNREGISTERED_COOLDOWN_SECONDS` (60 seconds by default).
+Different device records have independent cooldowns, and behavioral alert
+categories use their own rule state and cooldowns. After the unauthorized
+cooldown expires, another observation can generate a new unauthorized alert.
+This is a notification-rate policy, not suppression of the underlying
+observations or inventory updates.
+
+Evidence is limited to fields present in the observation. For example,
+destination IP and protocol are included when observed and omitted when
+unavailable. `UNREGISTERED_DEVICE` is an authorization-policy alert, not a
+threshold rule, so it does not claim a measurement threshold or fabricate one.
+
+## Optional passive monitoring
+
+Passive capture is not installed as a dependency and never starts when the API
+launches. To try it, install Scapy in the backend environment, choose an
+interface supported by the local platform, then opt in before starting the
+backend:
+
+```powershell
+python -m pip install scapy
+$env:SECURITY_ENGINE_PASSIVE_CAPTURE_ENABLED = "true"
+$env:SECURITY_ENGINE_PASSIVE_CAPTURE_INTERFACE = "Wi-Fi"
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+On Windows, packet capture generally requires Npcap and appropriate
+permissions; interface names and support depend on the local Scapy/Npcap
+installation. On other platforms, capture permissions and interface selection
+also depend on the OS. The loopback-only controls explicitly start and stop
+capture:
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/monitoring/passive/start"
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/monitoring/passive/stop"
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/monitoring/status"
+```
+
+Capture-control requests are rejected unless the opt-in setting is enabled and
+the caller is connected over loopback. Missing Scapy, interface errors, or
+permission/platform failures are reported in the API response and monitoring
+status instead of being started automatically. Captured records contain only
+packet metadata (addresses, protocol, packet count, and observed byte length),
+not payload contents. The passive provider is optional and has not been
+validated on this host; do not treat its availability status as proof that the
+selected interface can capture.
+
+Observation packet counts use the configured message-rate threshold and
+window; observed byte totals share the existing configured rolling volume
+threshold with application request-body bytes. Alerts retain source,
+simulation state, measured values, thresholds, and observed network metadata.
+Repeated alerts use the existing cooldown/deduplication behavior.
 
 ## API schemas
 

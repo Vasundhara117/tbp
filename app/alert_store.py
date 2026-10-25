@@ -18,7 +18,7 @@ class AlertStore:
         device_id: str,
         category: str,
         severity: str,
-        evidence: dict[str, int],
+        evidence: dict[str, int | float | str | bool | None],
         summary: str,
         timestamp_ms: int,
     ) -> AlertResponse:

@@ -15,6 +15,8 @@ class Settings:
     behavioral_alert_cooldown_seconds: float = 60.0
     alert_history_limit: int = 1_000
     max_request_body_bytes: int = 65_536
+    passive_capture_enabled: bool = False
+    passive_capture_interface: str | None = None
 
     def __post_init__(self) -> None:
         durations = {
@@ -50,6 +52,13 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         """Build settings from SECURITY_ENGINE_* environment variables."""
+        passive_capture_enabled = os.getenv(
+            "SECURITY_ENGINE_PASSIVE_CAPTURE_ENABLED", "false"
+        ).strip().lower()
+        if passive_capture_enabled not in {"true", "false", "1", "0", "yes", "no"}:
+            raise ValueError(
+                "SECURITY_ENGINE_PASSIVE_CAPTURE_ENABLED must be a boolean"
+            )
         return cls(
             message_window_seconds=float(
                 os.getenv("SECURITY_ENGINE_MESSAGE_WINDOW_SECONDS", "10")
@@ -77,4 +86,9 @@ class Settings:
             max_request_body_bytes=int(
                 os.getenv("SECURITY_ENGINE_MAX_REQUEST_BODY_BYTES", "65536")
             ),
+            passive_capture_enabled=passive_capture_enabled in {"true", "1", "yes"},
+            passive_capture_interface=os.getenv(
+                "SECURITY_ENGINE_PASSIVE_CAPTURE_INTERFACE"
+            )
+            or None,
         )
