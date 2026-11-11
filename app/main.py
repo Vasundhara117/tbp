@@ -1,13 +1,17 @@
 """FastAPI application and versioned security-engine endpoints."""
 
 import ipaddress
+import secrets
+import time
 from typing import Any
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from .alert_store import AlertStore
 from .config import Settings
+from .device_control import DeviceCommandController
 from .detector import SecurityEngine
 from .observers import (
     ObservationProviderError,
@@ -18,6 +22,7 @@ from .registry import DeviceRegistry
 from .schemas import (
     AlertListResponse,
     DeviceListResponse,
+    DeviceCommandRequest,
     HealthResponse,
     MessageRequest,
     MessageResponse,
@@ -25,6 +30,8 @@ from .schemas import (
     NetworkObservation,
     ObservationIngestResponse,
 )
+
+DEVICE_HEARTBEAT_MAX_AGE_MS = 20_000
 
 
 class RequestBodySizeLimitMiddleware:
@@ -105,6 +112,8 @@ def create_app(
     app.state.engine = engine
     app.state.synthetic_provider = synthetic_provider
     app.state.passive_provider = selected_passive_provider
+    device_command_controller = DeviceCommandController()
+    app.state.device_command_controller = device_command_controller
     app.add_middleware(
         RequestBodySizeLimitMiddleware,
         max_body_bytes=selected_settings.max_request_body_bytes,
@@ -127,6 +136,115 @@ def create_app(
     def alerts(limit: int = Query(default=100, ge=1, le=1_000)) -> AlertListResponse:
         items = alert_store.recent(limit)
         return AlertListResponse(alerts=items, count=len(items))
+
+    @app.get("/api/v1/device-control/status")
+    def device_control_status(request: Request) -> dict[str, str | int | bool]:
+        if not _request_is_loopback(request) or not _request_origin_is_loopback(request):
+            raise HTTPException(
+                status_code=403,
+                detail="Device controls are restricted to loopback clients.",
+            )
+        status = device_command_controller.status()
+        device = next(
+            (item for item in engine.devices() if item.device_id == "ESP32-01"),
+            None,
+        )
+        last_seen = device.last_seen_ms if device is not None else None
+        is_recent = (
+            last_seen is not None
+            and 0 <= int(time.time() * 1000) - last_seen
+            <= DEVICE_HEARTBEAT_MAX_AGE_MS
+        )
+        return {
+            **status,
+            "connected": is_recent,
+            "last_seen_ms": last_seen or 0,
+            "control_configured": bool(selected_settings.device_control_token),
+        }
+
+    @app.post("/api/v1/device-control/commands")
+    def issue_device_command(
+        body: DeviceCommandRequest,
+        request: Request,
+    ) -> dict[str, str | int]:
+        if not _request_is_loopback(request) or not _request_origin_is_loopback(request):
+            raise HTTPException(
+                status_code=403,
+                detail="Device controls are restricted to loopback clients.",
+            )
+        if not selected_settings.device_control_token:
+            raise HTTPException(
+                status_code=503,
+                detail="Device control is not configured on the backend.",
+            )
+        device = next(
+            (item for item in engine.devices() if item.device_id == "ESP32-01"),
+            None,
+        )
+        last_seen = device.last_seen_ms if device is not None else None
+        if (
+            last_seen is None
+            or not 0
+            <= int(time.time() * 1000) - last_seen
+            <= DEVICE_HEARTBEAT_MAX_AGE_MS
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "ESP32-01 has not sent a heartbeat recently. Check its "
+                    "Wi-Fi and server connection first."
+                ),
+            )
+        try:
+            return device_command_controller.issue(
+                body.mode,
+                body.duration_seconds,
+            )
+        except RuntimeError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.get(
+        "/api/v1/device-control/commands/next",
+        response_class=PlainTextResponse,
+    )
+    def take_device_command(
+        device_id: str = Query(min_length=1, max_length=64),
+        x_device_token: str | None = Header(default=None),
+    ) -> Response:
+        _validate_device_token(
+            selected_settings.device_control_token,
+            x_device_token,
+        )
+        if device_id != "ESP32-01":
+            raise HTTPException(status_code=404, detail="Unknown controlled device.")
+        command = device_command_controller.take_pending()
+        if command is None:
+            return Response(status_code=204)
+        if command["mode"] == "burst":
+            payload = (
+                f'{command["command_id"]}|BURST|'
+                f'{command["duration_seconds"]}'
+            )
+        else:
+            payload = f'{command["command_id"]}|NORMAL|0'
+        return PlainTextResponse(payload)
+
+    @app.post("/api/v1/device-control/commands/ack")
+    def acknowledge_device_command(
+        command_id: str = Query(min_length=1, max_length=64),
+        status: str = Query(pattern="^(started|completed)$"),
+        x_device_token: str | None = Header(default=None),
+    ) -> Response:
+        _validate_device_token(
+            selected_settings.device_control_token,
+            x_device_token,
+        )
+        if not device_command_controller.acknowledge(command_id, status):
+            raise HTTPException(
+                status_code=409,
+                detail="Command acknowledgement does not match the current device command.",
+            )
+        return Response(status_code=204)
 
     @app.post(
         "/api/v1/observations",
@@ -205,6 +323,43 @@ def _request_is_loopback(request: Request) -> bool:
         return ipaddress.ip_address(client.host).is_loopback
     except ValueError:
         return False
+
+
+def _request_origin_is_loopback(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True
+    try:
+        hostname = urlparse(origin).hostname
+    except ValueError:
+        return False
+    if hostname is None:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_device_token(
+    configured_token: str | None,
+    presented_token: str | None,
+) -> None:
+    if not configured_token:
+        raise HTTPException(
+            status_code=503,
+            detail="Device control is not configured on the backend.",
+        )
+    if presented_token is None or not secrets.compare_digest(
+        configured_token,
+        presented_token,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid device control token.",
+        )
 
 
 app = create_app()

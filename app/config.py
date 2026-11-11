@@ -17,8 +17,11 @@ class Settings:
     max_request_body_bytes: int = 65_536
     passive_capture_enabled: bool = False
     passive_capture_interface: str | None = None
+    device_control_token: str | None = None
 
     def __post_init__(self) -> None:
+        if self.device_control_token is not None and len(self.device_control_token) < 16:
+            raise ValueError("device_control_token must be at least 16 characters")
         durations = {
             "message_window_seconds": self.message_window_seconds,
             "volume_window_seconds": self.volume_window_seconds,
@@ -90,5 +93,7 @@ class Settings:
             passive_capture_interface=os.getenv(
                 "SECURITY_ENGINE_PASSIVE_CAPTURE_INTERFACE"
             )
+            or None,
+            device_control_token=os.getenv("SECURITY_ENGINE_DEVICE_CONTROL_TOKEN")
             or None,
         )

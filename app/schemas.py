@@ -2,7 +2,7 @@
 
 import ipaddress
 import re
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -23,6 +23,13 @@ class MessageRequest(BaseModel):
     message_id: Annotated[StrictStr, Field(min_length=1, max_length=128)]
     timestamp_ms: Annotated[StrictInt, Field(ge=0)]
     data: dict[str, Any]
+
+
+class DeviceCommandRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["normal", "burst"]
+    duration_seconds: Annotated[StrictInt, Field(ge=1, le=10)] = 10
 
 
 class NetworkObservation(BaseModel):
