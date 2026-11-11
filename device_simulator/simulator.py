@@ -9,8 +9,8 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_URL = "http://127.0.0.1:8000/api/v1/messages"
-DEFAULT_DEVICE_ID = "CCTV-ESP32-01"
-DEVICE_TYPE = "cctv_simulator"
+DEFAULT_DEVICE_ID = "ESP32-01"
+DEVICE_TYPE = "esp32_device"
 
 
 def send_message(server_url, device_id, message_number):

@@ -61,7 +61,7 @@ def _fallback(alert: dict, device: dict | None) -> dict:
     elif any(k in cat for k in ("rate", "volume", "behavior", "traffic", "anomal")):
         impact = "If the observed behavior is sustained and outside the device's expected baseline, it could affect network capacity or indicate a configuration issue. No impact is established by this alert alone."
     actions = ["Confirm the alert record and detection rule with the backend source.", "Check the device identity and recent activity against the approved inventory and expected baseline.", "Preserve relevant logs and document findings before taking action.", "Any containment or access change requires administrator review and approval."]
-    return {"summary": summary, "observed_evidence": evidence_lines, "rule_explanation": explanation, "potential_impact": impact, "recommended_actions": actions, "uncertainties": uncertainty, "generation_method": "Template-generated (deterministic; no LLM used)."}
+    return {"summary": summary, "observed_evidence": evidence_lines, "rule_explanation": explanation, "potential_impact": impact, "recommended_actions": actions, "uncertainties": uncertainty, "generation_method": "Template-generated (deterministic; LLM not configured)."}
 
 
 def _valid_report(obj: Any) -> bool:
@@ -98,4 +98,12 @@ def generate_incident_report(alert: dict, device: dict | None = None) -> dict:
     """
     if not isinstance(alert, dict): alert = {}
     if device is not None and not isinstance(device, dict): device = None
-    return _llm_report(alert, device) or _fallback(alert, device)
+    report = _llm_report(alert, device)
+    if report is not None:
+        return report
+    fallback = _fallback(alert, device)
+    if os.getenv("OPENAI_API_KEY"):
+        fallback["generation_method"] = (
+            "Template-generated (deterministic; configured LLM unavailable or response invalid)."
+        )
+    return fallback

@@ -12,8 +12,8 @@ const char* WIFI_PASSWORD = "PASSWORD";
 const char* SERVER_URL =
     "http://192.168.29.38:8000/api/v1/messages";
 
-const char* DEVICE_ID = "CCTV-ESP32-01";
-const char* DEVICE_TYPE = "cctv_simulator";
+const char* DEVICE_ID = "ESP32-01";
+const char* DEVICE_TYPE = "esp32_device";
 
 const unsigned long NORMAL_INTERVAL_MS = 5000;
 const unsigned long BURST_INTERVAL_MS = 200;

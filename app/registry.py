@@ -5,7 +5,7 @@ from threading import RLock
 from .schemas import NetworkObservation
 
 
-DEFAULT_DEVICES = {"CCTV-ESP32-01": "cctv_simulator"}
+DEFAULT_DEVICES = {"ESP32-01": "esp32_device"}
 
 
 class DeviceRegistry:

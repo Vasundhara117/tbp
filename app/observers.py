@@ -18,8 +18,8 @@ class SyntheticObservationProvider:
 
     _events = (
         {
-            "device_id": "CCTV-ESP32-01",
-            "device_type": "cctv_simulator",
+            "device_id": "ESP32-01",
+            "device_type": "esp32_device",
             "mac_address": "02:00:00:00:00:01",
             "ip_address": "192.0.2.10",
         },

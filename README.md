@@ -1,8 +1,10 @@
 # SecureIoT Sentinel — Security Detection Engine
 
-This module is a small FastAPI backend for observing device messages and raising
-deterministic policy or behavior alerts. It does not use an AI classifier and
-does not require physical ESP32 hardware.
+This project is an IoT monitoring prototype with a FastAPI backend for
+observing device messages and raising deterministic policy or behavior alerts.
+The workflow can be tested with a Python simulator or the included ESP32
+firmware. Detection is rule-based; incident summaries are provided separately
+by the optional dashboard module.
 
 ## Architecture
 
@@ -22,6 +24,13 @@ does not require physical ESP32 hardware.
 An unregistered device is a policy violation, not conclusive proof of malicious
 intent. Alert severity and summaries are demonstration choices, not a universal
 severity standard.
+
+The default demonstration device is `ESP32-01` (`esp32_device`). Its firmware
+sends periodic heartbeats and can generate a bounded burst of messages. An
+unregistered ID and traffic above configured thresholds produce alerts for
+review. The dashboard fetches backend data manually or on an optional
+10-second refresh; it does not block devices. Device IDs and MAC addresses are
+not cryptographic authentication, and MAC spoofing is not reliably detected.
 
 ## Windows PowerShell setup
 
@@ -63,8 +72,8 @@ With the server running locally:
 
 ```powershell
 $body = @{
-    device_id = "CCTV-ESP32-01"
-    device_type = "cctv_simulator"
+    device_id = "ESP32-01"
+    device_type = "esp32_device"
     message_id = "msg-0001"
     timestamp_ms = 1790000000000
     data = @{
@@ -78,6 +87,20 @@ Invoke-RestMethod -Method Post `
     -ContentType "application/json" `
     -Body $body
 ```
+
+For a quick burst-alert demonstration, keep the backend running and use a
+second PowerShell window from the repository root:
+
+```powershell
+python .\device_simulator\simulator.py --mode burst --duration 10
+```
+
+The simulator sends as `ESP32-01` by default. For physical hardware, configure
+the Wi-Fi credentials and backend LAN URL in the ESP32 sketch, upload it, open
+the serial monitor, and enter `BURST` (or `BURST 10`). A burst should exceed
+the default message-rate threshold and produce a high-severity alert. The
+dashboard can display it after **Refresh backend** or with optional periodic
+refresh enabled.
 
 ## Configuration and defaults
 
@@ -102,7 +125,7 @@ universal security limits. Request size means the HTTP request-body bytes
 received by the application; it does not include headers, transport framing, or
 all network traffic.
 
-The initial registry contains `CCTV-ESP32-01` with type `cctv_simulator`.
+The initial registry contains `ESP32-01` with type `esp32_device`.
 Change authorized devices without changing detection rules by creating a
 `DeviceRegistry` and passing it to `create_app`, or by calling
 `register(device_id, device_type)` on the engine's registry. For example:
@@ -111,7 +134,7 @@ Change authorized devices without changing detection rules by creating a
 from app.main import create_app
 from app.registry import DeviceRegistry
 
-registry = DeviceRegistry({"CCTV-ESP32-01": "cctv_simulator"})
+registry = DeviceRegistry({"ESP32-01": "esp32_device"})
 registry.register("door-sensor-01", "door_sensor")
 app = create_app(registry=registry)
 ```
@@ -157,10 +180,10 @@ from app.main import create_app
 from app.registry import DeviceRegistry
 
 registry = DeviceRegistry(
-    {"CCTV-ESP32-01": "cctv_simulator"},
-    mac_addresses={"02:00:00:00:00:01": "CCTV-ESP32-01"},
+    {"ESP32-01": "esp32_device"},
+    mac_addresses={"02:00:00:00:00:01": "ESP32-01"},
     expected_destinations={
-        "CCTV-ESP32-01": {"192.0.2.5", "198.51.100.10"}
+        "ESP32-01": {"192.0.2.5", "198.51.100.10"}
     },
 )
 app = create_app(registry=registry)
@@ -273,8 +296,8 @@ Request:
 
 ```json
 {
-  "device_id": "CCTV-ESP32-01",
-  "device_type": "cctv_simulator",
+  "device_id": "ESP32-01",
+  "device_type": "esp32_device",
   "message_id": "msg-0001",
   "timestamp_ms": 1790000000000,
   "data": {"status": "online", "activity": "heartbeat"}
@@ -286,7 +309,7 @@ request):
 
 ```json
 {
-  "device_id": "CCTV-ESP32-01",
+  "device_id": "ESP32-01",
   "registered": true,
   "message_id": "msg-0001",
   "received_at_ms": 1790000001000,
@@ -314,7 +337,7 @@ for the applicable rule.
 ```json
 {
   "alert_id": "ALT-0001",
-  "device_id": "CCTV-ESP32-01",
+  "device_id": "ESP32-01",
   "category": "HIGH_MESSAGE_RATE",
   "severity": "HIGH",
   "evidence": {
@@ -341,8 +364,8 @@ ID. An authorized but not-yet-observed device has `last_seen_ms: null`.
 {
   "devices": [
     {
-      "device_id": "CCTV-ESP32-01",
-      "device_type": "cctv_simulator",
+      "device_id": "ESP32-01",
+      "device_type": "esp32_device",
       "registered": true,
       "authorized": true,
       "last_seen_ms": null,

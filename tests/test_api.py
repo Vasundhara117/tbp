@@ -16,14 +16,14 @@ def make_client(
 
 def message(
     *,
-    device_id: str = "CCTV-ESP32-01",
+    device_id: str = "ESP32-01",
     message_id: str = "msg-0001",
     timestamp_ms: int = 1_790_000_000_000,
     data: dict | None = None,
 ) -> dict:
     return {
         "device_id": device_id,
-        "device_type": "cctv_simulator",
+        "device_type": "esp32_device",
         "message_id": message_id,
         "timestamp_ms": timestamp_ms,
         "data": data if data is not None else {"status": "online"},
@@ -47,13 +47,13 @@ def test_authorized_normal_message_has_no_alert() -> None:
 def test_unregistered_device_generates_medium_alert() -> None:
     with make_client() as client:
         response = client.post(
-            "/api/v1/messages", json=message(device_id="unknown-camera")
+            "/api/v1/messages", json=message(device_id="unknown-device")
         )
 
     alert = response.json()["alerts"][0]
     assert alert["category"] == "UNREGISTERED_DEVICE"
     assert alert["severity"] == "MEDIUM"
-    assert alert["device_id"] == "unknown-camera"
+    assert alert["device_id"] == "unknown-device"
 
 
 def test_more_than_twenty_messages_triggers_rate_alert() -> None:
@@ -71,6 +71,47 @@ def test_more_than_twenty_messages_triggers_rate_alert() -> None:
     assert rate_alert["severity"] == "HIGH"
     assert rate_alert["evidence"]["messages_in_window"] == 21
     assert rate_alert["evidence"]["threshold"] == 20
+
+
+def test_esp32_demo_workflow_classifies_devices_and_lists_alerts() -> None:
+    with make_client() as client:
+        normal = client.post(
+            "/api/v1/messages",
+            json=message(message_id="esp32-normal"),
+        ).json()
+        unknown = client.post(
+            "/api/v1/messages",
+            json=message(device_id="ESP32-UNKNOWN-01", message_id="unknown"),
+        ).json()
+        burst_responses = [
+            client.post(
+                "/api/v1/messages",
+                json=message(message_id=f"esp32-burst-{index}"),
+            ).json()
+            for index in range(21)
+        ]
+        devices = client.get("/api/v1/devices").json()["devices"]
+        alerts = client.get("/api/v1/alerts").json()["alerts"]
+
+    assert normal["registered"] is True
+    assert unknown["registered"] is False
+    assert any(
+        alert["category"] == "UNREGISTERED_DEVICE"
+        for alert in unknown["alerts"]
+    )
+    assert any(
+        alert["category"] == "HIGH_MESSAGE_RATE"
+        for result in burst_responses
+        for alert in result["alerts"]
+    )
+    assert {device["device_id"] for device in devices} >= {
+        "ESP32-01",
+        "ESP32-UNKNOWN-01",
+    }
+    assert {alert["category"] for alert in alerts} >= {
+        "UNREGISTERED_DEVICE",
+        "HIGH_MESSAGE_RATE",
+    }
 
 
 def test_request_body_bytes_trigger_volume_alert() -> None:
@@ -103,7 +144,7 @@ def test_unregistered_alerts_respect_cooldown() -> None:
         responses = [
             client.post(
                 "/api/v1/messages",
-                json=message(device_id="unknown-camera", message_id=f"unknown-{i}"),
+                json=message(device_id="unknown-device", message_id=f"unknown-{i}"),
             )
             for i in range(10)
         ]
@@ -120,7 +161,7 @@ def test_unregistered_alerts_respect_cooldown() -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        {"device_id": "CCTV-ESP32-01"},
+        {"device_id": "ESP32-01"},
         {
             **message(),
             "timestamp_ms": "not-an-integer",
@@ -159,7 +200,7 @@ def test_health_devices_and_alerts_schemas() -> None:
     assert health.json() == {"status": "ok"}
     device_body = devices.json()
     assert device_body["count"] == len(device_body["devices"])
-    authorized = next(d for d in device_body["devices"] if d["device_id"] == "CCTV-ESP32-01")
+    authorized = next(d for d in device_body["devices"] if d["device_id"] == "ESP32-01")
     observed = next(
         d for d in device_body["devices"] if d["device_id"] == "unregistered-device"
     )

@@ -417,8 +417,8 @@ def test_existing_routes_keep_their_response_envelopes() -> None:
         message = client.post(
             "/api/v1/messages",
             json={
-                "device_id": "CCTV-ESP32-01",
-                "device_type": "cctv_simulator",
+                "device_id": "ESP32-01",
+                "device_type": "esp32_device",
                 "message_id": "preserved",
                 "timestamp_ms": 1,
                 "data": {"status": "online"},

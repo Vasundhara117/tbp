@@ -3,8 +3,8 @@ from app.registry import DeviceRegistry
 
 def test_default_registry_contains_demonstration_device() -> None:
     registry = DeviceRegistry()
-    assert registry.is_registered("CCTV-ESP32-01")
-    assert registry.device_type_for("CCTV-ESP32-01") == "cctv_simulator"
+    assert registry.is_registered("ESP32-01")
+    assert registry.device_type_for("ESP32-01") == "esp32_device"
     assert not registry.is_registered("unknown")
 
 

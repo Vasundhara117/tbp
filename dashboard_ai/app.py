@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 # Support the documented `streamlit run dashboard_ai/app.py` invocation.
 _MODULE_DIR = str(Path(__file__).resolve().parent)
@@ -40,10 +41,25 @@ if "load_time" not in st.session_state:
 col_refresh, col_state = st.columns([1, 4])
 with col_refresh:
     refresh = st.button("Refresh backend", type="primary")
-if st.session_state.snapshot is None or refresh:
+    auto_refresh_enabled = st.checkbox("Auto-refresh every 10 seconds", value=False)
+
+auto_refresh_count = None
+if auto_refresh_enabled:
+    auto_refresh_count = st_autorefresh(
+        interval=10_000,
+        key="backend_auto_refresh",
+    )
+auto_refresh_due = (
+    auto_refresh_enabled
+    and auto_refresh_count != st.session_state.get("last_auto_refresh_count")
+)
+
+if st.session_state.snapshot is None or refresh or auto_refresh_due:
     with st.spinner("Fetching backend data…"):
         st.session_state.snapshot = load_snapshot()
         st.session_state.load_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    if auto_refresh_enabled:
+        st.session_state.last_auto_refresh_count = auto_refresh_count
 snapshot = st.session_state.snapshot
 
 health_ok = snapshot["health"].ok
@@ -213,10 +229,22 @@ for index, a in enumerate(alerts):
 if alert_rows:
     st.dataframe([{k: row[k] for k in ("Alert ID", "Device ID", "Category group", "Category", "Severity", "Timestamp", "Rule", "Threshold", "Evidence")} for row in alert_rows], use_container_width=True, hide_index=True)
     st.subheader("Incident Intelligence")
+    st.caption("Incident summaries use an optional configured LLM or deterministic templates. Detection remains rule-based.")
     selection = st.selectbox("Select an alert", range(len(alert_rows)), format_func=lambda i: f"{alert_rows[i]['Alert ID']} · {alert_rows[i]['Category']} · {alert_rows[i]['Severity']}", key="selected_alert")
     chosen = alert_rows[selection]
     matching_device = next((d for d in devices if str(first(d, "device_id", "id")) == str(first(chosen["Record"], "device_id"))), None)
-    report = generate_incident_report(chosen["Record"], matching_device)
+    report_key = json.dumps(
+        [chosen["Record"], matching_device],
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    if st.session_state.get("incident_report_key") != report_key:
+        st.session_state.incident_report = generate_incident_report(
+            chosen["Record"], matching_device
+        )
+        st.session_state.incident_report_key = report_key
+    report = st.session_state.incident_report
     left, right = st.columns([1, 1])
     with left:
         st.markdown("**Observed facts**")
